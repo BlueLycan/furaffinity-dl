@@ -17,10 +17,12 @@ fi
 
 runtime_dir="$HOME"'/.cache/furaffinity-dl'
 mkdir -p "$runtime_dir"
-tempfile="$(umask u=rwx,g=,o= && mktemp $runtime_dir/fa-dl.XXXXXXXXXX)"
+tempfile1="$(umask u=rwx,g=,o= && mktemp $runtime_dir/fa-dl.XXXXXXXXXX)"
+tempfile2="$(umask u=rwx,g=,o= && mktemp $runtime_dir/fa-dl.XXXXXXXXXX)"
 
 cleanup() {
-    rm -r "$tempfile"
+    rm -r "$tempfile1"
+	rm -r "$tempfile2"
 }
 trap cleanup EXIT
 
@@ -38,17 +40,18 @@ else
     }
 fi
 
-base_url=https://www.furaffinity.net/"$1"
+echo "All Page Urls" > all_urls.txt
+
+base_url=https://www.furaffinity.net/$1
 
 url="$base_url"
-page_counter=1
 
 # Iterate over the gallery pages with thumbnails and links to artwork view pages
 while true; do
-    fwget -O "$tempfile" "$url"
-    if [ "$COOKIES_FILE" != "" ] && grep -q 'furaffinity.net/login/' "$tempfile"; then
+    fwget -O "$tempfile1" "$url"
+    if [ "$COOKIES_FILE" != "" ] && grep -q 'furaffinity.net/login/' "$tempfile1"; then
         echo "--------------
-
+	
 ERROR: You have provided a cookies file, but it does not contain valid cookies.
 
 If this file used to work, this means that the cookies have expired;
@@ -64,29 +67,55 @@ https://github.com/Shnatsel/furaffinity-dl/issues" >&2
     fi
     # check if we've reached last page
     grep -q -i "there are no submissions to list" "$tempfile" && break
+	# Extract links to pages with individual artworks and iterate over them
+    artwork_pages=$(grep '<a href="/view/' "$tempfile1" | grep -E --only-matching '/view/[[:digit:]]+/' | uniq)
 
-    # Extract links to pages with individual artworks and iterate over them
-    artwork_pages=$(grep '<a href="/view/' "$tempfile" | grep -E --only-matching '/view/[[:digit:]]+/' | uniq)
-    for page in $artwork_pages; do
+	for page in $artwork_pages; do
         # Download the submission page
-        fwget -O "$tempfile" 'https://www.furaffinity.net'"$page"
+        fwget -O "$tempfile2" 'https://www.furaffinity.net'"$page"
 
         if grep -q "System Message" "$tempfile"; then
             echo "WARNING: $page seems to be inaccessible, skipping."
             continue
         fi
 	
-        # Get the full size image URL.
+		#pulls artist name from page, removing special characters
+		artist_name=$(grep -oP -m 1 '(?<=<img class="avatar" alt=").*(?=" src)' "$tempfile2" | tr -dc '[:alnum:]')
+        
+		# Get the full size image URL.
         # This will be a facdn.net link, we have to use HTTP
         # to get around DPI-based page blocking in some countries.
-        image_url='http:'$(grep -E --max-count=1 --only-matching 'href="//d\.facdn\.net/art/.+\.[[:alpha:]]{1,4}">Download' "$tempfile" | cut -d '"' -f 2)
-
+        art_url='http:'$(grep -E --max-count=1 --only-matching 'href="//d\.facdn\.net/art/.+">Download' "$tempfile2" | cut -d '"' -f 2)
+		# If no image was found, it could be music, try for music
+		if [ -z art_url ]; then
+			art_url='http:'$(grep -E --max-count=1 --only-matching 'href="//d\.facdn\.net/art/music/.+">Download' "$tempfile2" | cut -d '"' -f 2)
+		fi
+		#If music was not found, try for story
+		if [ -z art_url ]; then
+			art_url='http:'$(grep -E --max-count=1 --only-matching 'href="//d\.facdn\.net/art/stories/.+">Download' "$tempfile2" | cut -d '"' -f 2)
+		fi
+				
+		if [ ! -d $artist_name ]; then 
+			mkdir $artist_name
+		fi
         # TODO: Get the submission title out of the page
         # this trick may come in handy for avoiding slashes in filenames:
         # | tr '/' '∕'
-
-        wget --timestamping "$image_url"
+		cd "$artist_name"
+        wget -N --timestamping "$art_url" || echo "Failed: $art_url" >> failed_downloads.txt
+		cd ".."
     done
-    page_counter=$((page_counter + 1))
-    url="$base_url"/"$page_counter"
+
+	#Gets the next page url, this is no longer standard for favs, so incrementing page count no longer works. 
+	next_page_url=$(grep -E "href=\"/$1/[[:digit:]]+/[[:alpha:]]{0,4}\">Next" "$tempfile1"  | grep -E -m 1 --only-matching "$1/[[:digit:]]+/[[:alpha:]]{0,4}") ||  next_page_url=""
+	if [ -z $next_page_url ]; then
+		echo "Did not find Next page, download complete!"
+		exit 0
+	fi
+	
+	url="https://www.furaffinity.net/"$next_page_url
+	echo "-------------------------------------------------"
+	echo "Next page Url" $next_page_url 
+	echo $url >> all_urls.txt
+	echo "-------------------------------------------------"
 done
